@@ -89,26 +89,63 @@ Output:
 
 ---
 
-## Project layout
+## Agentic loop
+
+One turn = one ATK call + one DEF call + (conditionally) one JDG call.
+The loop runs until the secret leaks or `max_turns` is exhausted.
 
 ```
-.
-├── app.py                       # Flask server + SSE endpoint
-├── promptbreaker/
-│   ├── attacker.py              # Attacker LLM + AttackerMove schema enforcement
-│   ├── defender.py              # Defender LLM (single-turn responder)
-│   ├── judge.py                 # Hybrid substring + LLM judge
-│   ├── loop.py                  # The adversarial loop (sync + streaming)
-│   └── schemas.py               # Pydantic models (AttackerMove, TurnLog, RunResult)
-├── templates/index.html         # Single-page UI
-├── static/{app.js,style.css}    # SSE client + styling
-├── eval/
-│   ├── test_cases.json          # 12 labeled defender prompts
-│   └── run_eval.py              # Eval runner -> ATTACK_SUCCESS_RATE
-├── requirements.txt
-├── .env.example
-└── REPORT.md
+                      user: defender system prompt + secret
+                                       |
+                                       v
+     +============== adversarial loop  (1 .. max_turns) =================+
+     |                                                                  |
+     |    +------------------+                                          |
+     |    | ATK   attacker   |  reads prior turns + strategies tried,   |
+     |    |       (amber)    |  picks a *new* strategy from 10,         |
+     |    +------------------+  emits AttackerMove JSON                  |
+     |             |                                                    |
+     |             |  payload                                            |
+     |             v                                                    |
+     |    +------------------+                                          |
+     |    | DEF   defender   |  stateless single-turn reply              |
+     |    |       (cyan)     |  under the user's system prompt           |
+     |    +------------------+                                          |
+     |             |                                                    |
+     |             |  reply text                                         |
+     |             v                                                    |
+     |    +------------------+                                          |
+     |    | JDG   judge      |  fast: substring + reverse + base64;      |
+     |    |       (mauve)    |  LLM fallback only if inconclusive        |
+     |    +------------------+                                          |
+     |             |                                                    |
+     |             v                                                    |
+     |     secret revealed?  ---yes--->  break, attacker wins            |
+     |             |                                                    |
+     |             no                                                   |
+     |             |                                                    |
+     |             v                                                    |
+     |       next turn  (attacker now sees this turn in its history)    |
+     |                                                                  |
+     +==================================================================+
+                                       |
+                                       v
+                       RunResult:  leaked / held
+                                   + winning_payload (if leaked)
 ```
+
+Key properties this diagram encodes:
+
+- **Attacker is stateful, Defender is not.** ATK accumulates the full turn
+  history; DEF answers each payload as if it were the first request, which
+  models how a real production LLM endpoint behaves.
+- **Judge is hybrid.** The deterministic path catches obvious leaks for free;
+  the LLM judge only fires when normalization + reverse + base64 all come
+  back inconclusive, so the eval suite stays cheap.
+- **Strategy diversity is enforced upstream.** ATK is given the list of
+  strategies already tried and is told not to repeat one until all 10 are
+  exhausted -- this is what stops the loop from emitting the same
+  "ignore previous instructions" payload N times.
 
 ---
 
